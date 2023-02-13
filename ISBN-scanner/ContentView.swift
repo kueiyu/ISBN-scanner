@@ -7,82 +7,130 @@
 
 import SwiftUI
 import CoreData
+import AVFoundation
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
 
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
-
+    @State private var showingAlert = false
+    @State private var scannedISBN = ""
+    @State private var isScannerActive = false
+    
     var body: some View {
-        NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
-                    }
+        VStack {
+            if isScannerActive {
+                ScannerView(scannedISBN: $scannedISBN, isScannerActive: $isScannerActive)
+            } else {
+                Button("Scan ISBN") {
+                    self.isScannerActive = true
                 }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+                .padding()
             }
         }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
+        .alert(isPresented: $showingAlert) {
+            Alert(title: Text("Scanned ISBN"), message: Text(scannedISBN), dismissButton: .default(Text("OK")))
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
+struct ScannerView: UIViewRepresentable {
+    
+    @Binding var scannedISBN: String
+    @Binding var isScannerActive: Bool
+    
+    typealias UIViewType = UIView
+    
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: UIScreen.main.bounds)
+        
+        DispatchQueue.main.async {
+            let scanner = ScannerViewController()
+            scanner.delegate = context.coordinator
+            view.addSubview(scanner.view)
+            context.coordinator.scanner = scanner
+        }
+        
+        return view
+    }
+    
+    func updateUIView(_ uiView: UIView, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        return Coordinator(scannedISBN: $scannedISBN, isScannerActive: $isScannerActive)
+    }
+    
+    class Coordinator: NSObject, ScannerViewControllerDelegate {
+        
+        @Binding var scannedISBN: String
+        @Binding var isScannerActive: Bool
+        
+        var scanner: ScannerViewController?
+        
+        init(scannedISBN: Binding<String>, isScannerActive: Binding<Bool>) {
+            _scannedISBN = scannedISBN
+            _isScannerActive = isScannerActive
+        }
+        
+        func didScanBarcodeWithResult(result: String) {
+            scannedISBN = result
+            isScannerActive = false
+            scanner?.dismiss(animated: true, completion: nil)
+        }
+    }
+}
 
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+protocol ScannerViewControllerDelegate: AnyObject {
+    func didScanBarcodeWithResult(result: String)
+}
+
+class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    
+    weak var delegate: ScannerViewControllerDelegate?
+    
+    var captureSession: AVCaptureSession!
+    var previewLayer: AVCaptureVideoPreviewLayer!
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        captureSession = AVCaptureSession()
+        
+        guard let videoCaptureDevice = AVCaptureDevice.default(for: .video) else { return }
+        let videoInput: AVCaptureDeviceInput
+        
+        do {
+            videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
+        } catch {
+            return
+        }
+        
+        if (captureSession.canAddInput(videoInput)) {
+            captureSession.addInput(videoInput)
+        } else {
+            failed()
+            return
+        }
+        
+        let metadataOutput = AVCaptureMetadataOutput()
+        
+        if (captureSession.canAddOutput(metadataOutput)) {
+            captureSession.addOutput(metadataOutput)
+            
+            metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+            metadataOutput.metadataObjectTypes = [.ean13, .ean8] // This line specifies the types of barcodes to scan
+        } else {
+            failed()
+            return
+        }
+        
+        previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+        previewLayer.frame = view.layer.bounds
+        previewLayer.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(previewLayer)
+        
+        captureSession.startRunning()
+    }
+    
+    func failed(){
+        NSLog("captureSession could not add input");
     }
 }
